@@ -1,211 +1,282 @@
+
 #!/usr/bin/env python3
-# Firewall Breaker - Vehicle Info 
-# Created by: thakur2309
-# YouTube: Firewall Breaker
 
-"""
-DISCLAIMER:
-This tool is for EDUCATIONAL and ETHICAL USE ONLY.
-Unauthorized tracking, surveillance or background searches
-without permission may be ILLEGAL. Use responsibly.
-"""
-
-import sys
 import os
+import re
 import json
 import time
 import hashlib
+import logging
 import requests
-from urllib.parse import urlencode
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich import box
-from rich.align import Align
+
 from datetime import datetime
 
+# Existing vehicle lookup API
 API_BASE = "https://vehicleinfobyterabaap.vercel.app/lookup"
-VERSION = "2.0 PRO"
-console = Console()
 
-# ==================== UTILITIES ====================
-def clear_screen():
-    os.system("cls" if os.name == "nt" else "clear")
+# Directories
+RESULTS_DIR = "results"
+LOGS_DIR = "logs"
+CACHE_DIR = "cache"
 
-def slow_print(text, delay=0.03):
-    for ch in text:
-        print(ch, end="", flush=True)
-        time.sleep(delay)
-    print()
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------- DIRECTORY SETUP ----------------
 
 def ensure_dirs():
-    os.makedirs("results", exist_ok=True)
-    os.makedirs("logs", exist_ok=True)
-    os.makedirs("cache", exist_ok=True)
+    for directory in (RESULTS_DIR, LOGS_DIR, CACHE_DIR):
+        os.makedirs(directory, exist_ok=True)
+
 
 def log(msg):
-    with open("logs/firewall.log", "a") as f:
-        f.write(f"[{datetime.now()}] {msg}\n")
+    ensure_dirs()
+
+    try:
+        with open(
+            os.path.join(LOGS_DIR, "vehicle_lookup.log"),
+            "a",
+            encoding="utf-8",
+        ) as file:
+            file.write(f"[{datetime.now().isoformat()}] {msg}\n")
+    except OSError:
+        logger.exception("Unable to write lookup log")
+
+
+# ---------------- REGISTRATION ----------------
+
+def normalize_registration(rc):
+    """
+    Normalize an Indian vehicle registration number.
+    This checks formatting only, not registration validity.
+    """
+    rc = re.sub(r"[\s-]+", "", str(rc)).upper()
+
+    if not re.fullmatch(r"[A-Z0-9]{5,15}", rc):
+        raise ValueError("Invalid vehicle registration format.")
+
+    return rc
+
+
+# ---------------- CACHE ----------------
 
 def cache_path(rc):
-    return f"cache/{hashlib.md5(rc.encode()).hexdigest()}.json"
+    # Hash the registration to avoid putting it in the filename.
+    filename = hashlib.sha256(rc.encode("utf-8")).hexdigest()
+    return os.path.join(CACHE_DIR, f"{filename}.json")
 
-def save_cache(rc, data):
-    with open(cache_path(rc), "w") as f:
-        json.dump(data, f, indent=4)
 
 def load_cache(rc):
     path = cache_path(rc)
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            return json.load(f)
+
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        if isinstance(data, dict) and not data.get("error"):
+            return data
+
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Cache read failed")
+
     return None
 
 
-# ==================== UI / BANNER ====================
-def loading_animation():
-    console.print("\n[bold green]Initializing Firewall Breaker...[/bold green]\n")
-    for step in ["Booting modules", "Checking network", "Loading UI", "Starting engine"]:
-        console.print(f"[bold cyan]>> {step}...[/bold cyan]")
-        time.sleep(0.3)
-    time.sleep(0.4)
-
-def banner():
-    console.rule()
-    console.print(Align.center(f"[bold red]FIREWALL BREAKER[/bold red]  •  [yellow]{VERSION}[/yellow]"))
-    console.print(Align.center("[green]Created by: thakur2309 • YouTube: Firewall Breaker[/green]"))
-    console.rule()
-    console.print(
-        Panel(
-            "[bold white on red] DISCLAIMER [/bold white on red]\nThis tool is for lawful, educational use only.",
-            style="red",
-            expand=False,
-        )
-    )
-    console.rule()
-
-# ==================== CORE LOGIC ====================
-def get_rc_input():
-    console.print("\n[bold cyan]Enter Vehicle RC number:[/bold cyan] ", end="")
-    return input().strip()
-
-def fetch_vehicle_data(rc):
-    cached = load_cache(rc)
-    if cached:
-        return cached, True
-
-    params = {"rc": rc}
-    url = f"{API_BASE}?{urlencode(params)}"
-
-    start = time.time()
-    try:
-        resp = requests.get(
-            url,
-            timeout=15,
-            headers={"User-Agent": "FirewallBreaker/PRO (by thakur2309)"},
-        )
-    except Exception as e:
-        return {"error": str(e)}, False
-
-    duration = round((time.time() - start) * 1000, 2)
-
-    if resp.status_code != 200:
-        return {"error": f"HTTP {resp.status_code} – {resp.text}"}, False
-
-    try:
-        data = resp.json()
-    except:
-        return {"error": "Invalid JSON returned by API."}, False
-
-    data["_api_time"] = duration
-    save_cache(rc, data)
-    return data, False
-
-def export_json(rc, data):
-    path = f"results/{rc}.json"
-    with open(path, "w") as f:
-        json.dump(data, f, indent=4)
-
-def print_results(rc, data, from_cache):
-    tool_info = f"[bold magenta]Firewall Breaker PRO[/bold magenta]  •  [bold magenta]by thakur2309[/bold magenta]"
-    console.print(Panel(tool_info, style="magenta", expand=False))
-
-    if "error" in data:
-        console.print(Panel(f"[bold red]Error:[/bold red] {data['error']}", style="red"))
+def save_cache(rc, data):
+    if not isinstance(data, dict) or data.get("error"):
         return
 
-    api_time = data.get("_api_time", None)
+    path = cache_path(rc)
+    temp_path = path + ".tmp"
 
-    status = Panel(
-        f"[bold green]API: OK[/bold green]\nCached: {'YES' if from_cache else 'NO'}\nResponse Time: {api_time} ms",
-        style="green",
-        expand=False,
-    )
-    console.print(status)
-
-    
-    if "_api_time" in data:
-        del data["_api_time"]
-
-    table = Table(
-        title=f"Vehicle Information — {rc}",
-        box=box.ROUNDED,
-        show_lines=True,
-    )
-    table.add_column("Field", style="bold cyan", no_wrap=True)
-    table.add_column("Value", style="white")
-
-    for k, v in data.items():
-        table.add_row(k.replace("_", " ").title(), str(v))
-
-    console.print(table)
-
-    console.print(
-        "[bold yellow]Result saved to 'results/' folder. Logs saved in 'logs/' folder.[/bold yellow]\n"
-    )
-
-    console.print(
-        Panel(
-            Align.center(
-                "Made with ♥ by Firewall Breaker\nYouTube: Firewall Breaker",
-                vertical="middle",
-            ),
-            style="blue",
-        )
-    )
-
-
-# ==================== ENTRY ====================
-def main():
-    ensure_dirs()
-    clear_screen()
-    loading_animation()
-    banner()
-
-    
-    if len(sys.argv) > 1 and sys.argv[1].startswith("--rc="):
-        rc = sys.argv[1].replace("--rc=", "")
-    else:
-        rc = get_rc_input()
-
-    if not rc:
-        console.print("[bold red]No RC entered – exiting.[/bold red]")
-        sys.exit(1)
-
-    log(f"Query started for RC: {rc}")
-
-    data, from_cache = fetch_vehicle_data(rc)
-    print_results(rc, data, from_cache)
-
-    if "error" not in data:
-        export_json(rc, data)
-        log(f"Result exported for RC: {rc}")
-
-    console.print("\n[bold green]Done.[/bold green]")
-
-if __name__ == "__main__":
     try:
-        main()
-    except KeyboardInterrupt:
-        console.print("\n[bold red]Interrupted by user – exiting.[/bold red]")
-        sys.exit(0)
+        with open(temp_path, "w", encoding="utf-8") as file:
+            json.dump(data, file, indent=2, ensure_ascii=False)
+
+        os.replace(temp_path, path)
+
+    except OSError:
+        logger.exception("Cache write failed")
+
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+
+
+# ---------------- VEHICLE LOOKUP ----------------
+
+def fetch_vehicle_data(rc):
+    """
+    Returns:
+        (result_dictionary, cached_boolean)
+
+    The upstream API must support the existing /lookup?rc=... endpoint.
+    """
+
+    ensure_dirs()
+
+    try:
+        rc = normalize_registration(rc)
+    except ValueError as exc:
+        return {"error": str(exc)}, False
+
+    cached_data = load_cache(rc)
+
+    if cached_data is not None:
+        return cached_data, True
+
+    started = time.monotonic()
+
+    try:
+        response = requests.get(
+            API_BASE,
+            params={"rc": rc},
+            timeout=(5, 20),
+            headers={
+                "User-Agent": "VehicleLookupBot/1.0",
+                "Accept": "application/json",
+            },
+        )
+
+    except requests.Timeout:
+        log(f"Request timed out for registration {rc}")
+        return {
+            "error": "The vehicle lookup service timed out."
+        }, False
+
+    except requests.RequestException as exc:
+        # Avoid logging complete request URLs or credentials.
+        log(
+            f"Request failed for {rc}: "
+            f"{type(exc).__name__}"
+        )
+        return {
+            "error": "Unable to connect to the vehicle lookup service."
+        }, False
+
+    duration_ms = round(
+        (time.monotonic() - started) * 1000,
+        2,
+    )
+
+    if response.status_code == 404:
+        # The HTTP status alone cannot distinguish an invalid endpoint
+        # from a missing record. Keep the body short for diagnostics.
+        log(
+            f"HTTP 404 for {rc}; "
+            f"response={response.text[:300]}"
+        )
+
+        return {
+            "error": (
+                "The lookup source returned HTTP 404. "
+                "The requested record or API endpoint may be unavailable."
+            )
+        }, False
+
+    if response.status_code in (401, 403):
+        log(f"HTTP {response.status_code} from lookup source")
+
+        return {
+            "error": (
+                "The lookup service denied the request. "
+                "Check its documented access requirements."
+            )
+        }, False
+
+    if response.status_code == 429:
+        log("Lookup source rate limit reached")
+
+        return {
+            "error": "The lookup service is rate-limiting requests."
+        }, False
+
+    if response.status_code >= 500:
+        log(f"Upstream server error: HTTP {response.status_code}")
+
+        return {
+            "error": "The vehicle lookup service has a server error."
+        }, False
+
+    if response.status_code != 200:
+        log(f"Unexpected HTTP status: {response.status_code}")
+
+        return {
+            "error": (
+                f"The lookup service returned HTTP "
+                f"{response.status_code}."
+            )
+        }, False
+
+    try:
+        data = response.json()
+
+    except ValueError:
+        log("Lookup source returned invalid JSON")
+
+        return {
+            "error": "The lookup service returned invalid JSON."
+        }, False
+
+    if not isinstance(data, dict):
+        return {
+            "error": "The lookup service returned an unexpected format."
+        }, False
+
+    # Respect error responses supplied inside HTTP 200 JSON.
+    if data.get("error"):
+        log(f"Lookup API reported an error for {rc}")
+
+        return {
+            "error": str(data["error"])[:300]
+        }, False
+
+    data["_api_time"] = duration_ms
+
+    save_cache(rc, data)
+
+    log(f"Successful lookup for {rc}")
+
+    return data, False
+
+
+# ---------------- OPTIONAL JSON EXPORT ----------------
+
+def export_json(rc, data):
+    ensure_dirs()
+
+    try:
+        rc = normalize_registration(rc)
+    except ValueError:
+        return False
+
+    if not isinstance(data, dict) or data.get("error"):
+        return False
+
+    path = os.path.join(RESULTS_DIR, f"{rc}.json")
+
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(
+                data,
+                file,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        return True
+
+    except OSError:
+        logger.exception("Unable to export lookup result")
+        return False
